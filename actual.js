@@ -3,6 +3,7 @@ const actual = require("@actual-app/api");
 const fs = require("fs");
 const inquirer = require("inquirer");
 let { q, runQuery } = require('@actual-app/api');
+const { buildActualAccountPayload } = require("./account-mapping.js");
 
 
 const appConfig = getAppConfigFromEnv();
@@ -49,6 +50,46 @@ async function initialize(config) {
  */
 function listAccounts(actualInstance) {
     return actualInstance.getAccounts();
+}
+
+/**
+ * Create an Actual Budget account from a linked Plaid account.
+ * Uses name/type/offbudget mapped from Plaid metadata. Initial balance is 0
+ * so imported history is not double-counted with a starting balance entry.
+ *
+ * @param {typeof actual} actualInstance
+ * @param {string} bankName
+ * @param {object} plaidAccount - Plaid account object
+ * @returns {Promise<{ id: string, name: string, type: string, offbudget: boolean }>}
+ */
+async function createAccountFromPlaid(actualInstance, bankName, plaidAccount) {
+    const payload = buildActualAccountPayload(bankName, plaidAccount);
+    // Prefer a unique name if one already exists
+    const existing = await actualInstance.getAccounts();
+    let name = payload.name;
+    const names = new Set(existing.map((a) => a.name));
+    if (names.has(name)) {
+        let i = 2;
+        while (names.has(`${name} (${i})`)) i += 1;
+        name = `${name} (${i})`;
+    }
+
+    const id = await actualInstance.createAccount(
+        {
+            name,
+            // type is accepted by Actual even if some TS defs omit it
+            type: payload.type,
+            offbudget: payload.offbudget,
+        },
+        0
+    );
+
+    return {
+        id,
+        name,
+        type: payload.type,
+        offbudget: payload.offbudget,
+    };
 }
 
 /**
@@ -214,6 +255,7 @@ async function finalize(actualInstance) {
 module.exports = {
     initialize,
     listAccounts,
+    createAccountFromPlaid,
     getLastTransactionDate,
     importPlaidTransactions,
     transactionMapper,
