@@ -10,6 +10,12 @@ const terminalLink = require("terminal-link");
 const { getAppConfigFromEnv, getConf } = require("./config.js");
 const { initialize, getLastTransactionDate, importPlaidTransactions, listAccounts, finalize, getBalance } = require("./actual.js");
 const { sendPushoverNotification } = require("./pushover.js");
+const {
+    fetchAllTransactionUpdates,
+    filterTransactionsForAccount,
+    buildLinkTokenRequest,
+    resolvePlaidSecret,
+} = require("./plaid-sync.js");
 
 const fastify = Fastify({
     logger: {
@@ -18,13 +24,15 @@ const fastify = Fastify({
 });
 
 let config;
-const appConfig = getAppConfigFromEnv()
+const appConfig = getAppConfigFromEnv();
+// Trial plan uses production secrets; development env was removed by Plaid (2024).
+const plaidSecret = resolvePlaidSecret(appConfig);
 const configuration = new Configuration({
     basePath: PlaidEnvironments[appConfig.PLAID_ENV],
     baseOptions: {
         headers: {
           'PLAID-CLIENT-ID': appConfig.PLAID_CLIENT_ID,
-          'PLAID-SECRET': appConfig.PLAID_SECRETS[appConfig.PLAID_ENV]
+          'PLAID-SECRET': plaidSecret,
         }
     }
 });
@@ -82,10 +90,11 @@ async function startLinkingPlaid() {
     const { dissmissedWarning } = await inquirer.prompt({
         type: "confirm",
         name: "dissmissedWarning",
-        message: `WARNING: A Plaid Dev account has a limited number of Links. See the ${terminalLink(
-            "Plaid Development Dashboard",
-            "https://dashboard.plaid.com/overview/development"
-        )} to check your usage. Proceed?`,
+        message: `WARNING: Plaid Trial allows up to 10 Items (linked bank connections). ` +
+            `Removed Items do not free the quota. See the ${terminalLink(
+            "Plaid Dashboard",
+            "https://dashboard.plaid.com/"
+        )} to check usage. Proceed?`,
     });
     if (!dissmissedWarning) {
         throw new Error("Plaid Linking cancelled");
@@ -166,64 +175,109 @@ module.exports = async (command, flags) => {
                     !flags.account || account.actualName === flags.account
             );
 
-            const endDate = dateFns.format(new Date(), "yyyy-MM-dd");
+            // Cache /transactions/sync results per access_token so multi-account
+            // Items only hit Plaid once per import run.
+            const updatesPerToken = {};
 
-            const transactionsPerToken = {};
-
-            const cachedTransaction = async (token, startDate) => {
-                const key = `${token}-${startDate.toString()}`;
-                if (!transactionsPerToken[key]) {
-                    transactionsPerToken[key] = await plaidClient.transactionsGet({
-                        access_token: token,
-                        start_date: startDate,
-                        end_date: endDate
-                    });
-
+            const getTokenUpdates = async (token, storedCursor) => {
+                const key = token;
+                if (!updatesPerToken[key]) {
+                    const cursor = storedCursor == null ? "" : storedCursor;
+                    console.log(
+                        `Plaid transactions/sync for Item (cursor ${cursor ? "incremental" : "full history"})...`
+                    );
+                    updatesPerToken[key] = await fetchAllTransactionUpdates(
+                        plaidClient,
+                        token,
+                        cursor,
+                        {
+                            daysRequested:
+                                appConfig.PLAID_TRANSACTIONS_DAYS_REQUESTED,
+                        }
+                    );
                 }
-                return transactionsPerToken[key];
-            }
+                return updatesPerToken[key];
+            };
 
             for (let [actualId, account] of accountsToSync) {
-                const startDate = dateFns.format(
-                    new Date(
-                        flags["since"] ||
-                        account.lastImport ||
-                        await getLastTransactionDate(actual, actualId)
-                    ),
-                    "yyyy-MM-dd"
+                const sinceDate = flags["since"]
+                    ? dateFns.format(new Date(flags["since"]), "yyyy-MM-dd")
+                    : null;
+
+                console.log(
+                    "Importing transactions for account:",
+                    account.plaidAccount.name,
+                    sinceDate ? `(since ${sinceDate})` : "(cursor-based sync)"
+                );
+                const tempStartTime = new Date();
+
+                // Prefer per-account cursor; fall back to shared Item cursor.
+                const storedCursor =
+                    account.plaidCursor != null
+                        ? account.plaidCursor
+                        : config.get(`plaidCursors.${account.plaidToken}`) ||
+                          "";
+
+                const updates = await getTokenUpdates(
+                    account.plaidToken,
+                    storedCursor
                 );
 
-                // Check if start and end is the same day, but not same second
-                if (startDate === endDate) {
-                    console.log("Skipping: ", account.plaidAccount.name, "because it was already imported today")
-                } else {
+                // Import both newly added and modified transactions; Actual
+                // dedupes on imported_id (transaction_id).
+                const candidates = (updates.added || []).concat(
+                    updates.modified || []
+                );
+                const transactionsForThisAccount = filterTransactionsForAccount(
+                    candidates,
+                    account.plaidAccount.account_id,
+                    sinceDate
+                );
 
-                    console.log("Importing transactions for account: ", account.plaidAccount.name, "from ", startDate, "to", endDate)
-                    const tempStartTime = new Date();
-
-                    const transactionsResponse = await cachedTransaction(account.plaidToken, startDate);
-                    const transactionsForThisAccount = transactionsResponse.data.transactions.filter(
-                        (transaction) =>
-                            transaction.account_id === account.plaidAccount.account_id
+                if (updates.removed && updates.removed.length) {
+                    const removedForAccount = updates.removed.filter(
+                        (r) =>
+                            !r.account_id ||
+                            r.account_id === account.plaidAccount.account_id
                     );
-
-                    // Sleep at least 2 sec to let user cancel, continue with promise
-                    const timeTookForPlaid = new Date() - tempStartTime;
-                    const timeToSleep = 2000 - timeTookForPlaid;
-                    if (timeToSleep > 0) {
-                        await new Promise((resolve) => setTimeout(resolve, timeToSleep));
+                    if (removedForAccount.length) {
+                        console.log(
+                            `Note: ${removedForAccount.length} removed transaction(s) reported by Plaid for ${account.plaidAccount.name}; Actual import does not auto-delete them.`
+                        );
                     }
+                }
 
-                    const importResult = await importPlaidTransactions(actual, actualId, account.plaidBankName, transactionsForThisAccount);
-                    config.set(`actualSync.${actualId}.lastImport`, new Date());
+                // Sleep at least 2 sec to let user cancel
+                const timeTookForPlaid = new Date() - tempStartTime;
+                const timeToSleep = 2000 - timeTookForPlaid;
+                if (timeToSleep > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, timeToSleep));
+                }
 
-                    const newTransactionCount = importResult.added ? importResult.added.length : 0;
-                    if (newTransactionCount > 0) {
-                        await sendPushoverNotification(appConfig, {
-                            title: `${account.actualName}: ${newTransactionCount} new transaction${newTransactionCount === 1 ? "" : "s"}`,
-                            message: `Found ${newTransactionCount} new transaction${newTransactionCount === 1 ? "" : "s"} for ${account.actualName} (${account.plaidBankName})`,
-                        });
-                    }
+                const importResult = await importPlaidTransactions(
+                    actual,
+                    actualId,
+                    account.plaidBankName,
+                    transactionsForThisAccount
+                );
+                config.set(`actualSync.${actualId}.lastImport`, new Date());
+                config.set(
+                    `actualSync.${actualId}.plaidCursor`,
+                    updates.nextCursor
+                );
+                config.set(
+                    `plaidCursors.${account.plaidToken}`,
+                    updates.nextCursor
+                );
+
+                const newTransactionCount = importResult.added
+                    ? importResult.added.length
+                    : 0;
+                if (newTransactionCount > 0) {
+                    await sendPushoverNotification(appConfig, {
+                        title: `${account.actualName}: ${newTransactionCount} new transaction${newTransactionCount === 1 ? "" : "s"}`,
+                        message: `Found ${newTransactionCount} new transaction${newTransactionCount === 1 ? "" : "s"} for ${account.actualName} (${account.plaidBankName})`,
+                    });
                 }
             }
             console.log("Import completed for all accounts");
@@ -388,20 +442,13 @@ module.exports = async (command, flags) => {
 fastify.get("/", (req, reply) => reply.sendFile("index.html"));
 
 fastify.post("/create_link_token", (request, reply) => {
-    const appConfig = getAppConfigFromEnv()
-
-    const configs = {
-        user: { client_user_id: config.get("user") },
-        client_name: "Actual Budget Plaid Importer",
-        products: appConfig.PLAID_PRODUCTS,
-        country_codes: appConfig.PLAID_COUNTRY_CODES,
-        language: appConfig.PLAID_LANGUAGE
-    };
+    const appConfig = getAppConfigFromEnv();
+    const configs = buildLinkTokenRequest(appConfig, config.get("user"));
     plaidClient.linkTokenCreate(configs)
         .then((response) => reply.send({ link_token: response.data.link_token }))
-        .catch(() => {
-            console.error(error);
-            process.exit(1);
+        .catch((error) => {
+            console.error("Failed to create Plaid link token:", error?.response?.data || error);
+            reply.code(500).send({ error: "Failed to create link token" });
         });
 });
 
