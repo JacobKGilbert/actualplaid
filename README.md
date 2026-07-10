@@ -8,6 +8,8 @@ Aligned with:
 - Cursor-based `/transactions/sync` (not legacy `/transactions/get`)
 - Current `@actual-app/api` client for self-hosted Actual
 
+**During Plaid pairing (`setup`), Actual Budget accounts can be created automatically** from each linked bank account—no need to pre-create them in Actual first.
+
 ## Requirements
 
 - Node.js 18+
@@ -173,6 +175,40 @@ Then set `APP_URL=https://plaid-link.example.com` in `.env`.
 - Do not put Plaid secrets or Actual passwords in the reverse proxy; they stay in actualplaid’s `.env` / environment.
 - If Link fails with redirect or OAuth errors, confirm `APP_URL`, the proxy hostname, and Plaid’s allowed redirect URIs are identical (including `https://`).
 
+## Automatic Actual accounts during Plaid pairing
+
+When you run `setup` and finish Plaid Link, actualplaid asks which bank accounts to keep. **By default it creates a matching Actual Budget account for each selected Plaid account** and stores the pairing.
+
+You do **not** need to create empty accounts in Actual beforehand (unless you prefer manual mapping).
+
+### What happens in `setup`
+
+1. Complete Plaid Link in the browser (authenticate with your bank).
+2. Choose which Plaid accounts to pair.
+3. Choose how to add them to Actual:
+   - **Create new Actual accounts automatically (recommended / default)** — uses Actual’s `createAccount` API
+   - **Map to existing Actual accounts** — for accounts you already created in Actual
+4. Mappings are saved locally; run `import` to pull transactions.
+
+### How Plaid accounts map to Actual
+
+| Plaid type / subtype | Actual type | Off-budget? | Example Actual name |
+| --- | --- | --- | --- |
+| depository / checking | `checking` | no | `Chase - TOTAL CHECKING (1234)` |
+| depository / savings, money market, CD | `savings` | no | `Ally - Savings (0001)` |
+| credit / credit card | `credit` | no | `Chase Freedom (9999)` |
+| investment / brokerage | `investment` | yes | `Fidelity - Brokerage (4321)` |
+| loan / mortgage | `mortgage` | yes | `Bank - Mortgage (5678)` |
+| other loans | `debt` | yes | `Bank - Student Loan (1111)` |
+
+- Names combine bank name, account label, and last-four mask when available.
+- If an account name already exists in Actual, a suffix like `(2)` is added.
+- **Initial balance is always `0`** so a full transaction history import does not double-count against a starting balance. Adjust opening balances in Actual after the first import if you need them.
+
+### Manual mapping (optional)
+
+If you already maintain accounts in Actual, choose **Map to existing Actual accounts** during setup and pair each selected Plaid account to an existing Actual account instead of creating new ones.
+
 ## Setup
 
 ```bash
@@ -192,7 +228,7 @@ node index.js setup
 # actualplaid setup
 ```
 
-3. Select the Plaid accounts to link. By default, **Actual accounts are created automatically** from each Plaid account (name/type/off-budget mapped from Plaid). You can still choose "Map to existing Actual accounts" if you prefer.
+3. Select the Plaid accounts to pair. **Actual accounts are created automatically by default** (see [Automatic Actual accounts during Plaid pairing](#automatic-actual-accounts-during-plaid-pairing)). Optionally map to existing Actual accounts instead.
 4. Import:
 
 ```bash
@@ -210,7 +246,7 @@ New Actual accounts are created with a **zero** starting balance so imported his
     $ actualplaid <command> <flags>
 
   Commands & Options
-    setup            Link bank accounts with your Actual Budget accounts via Plaid
+    setup            Link banks via Plaid; auto-create Actual accounts (or map existing)
     ls               List currently syncing accounts
     import           Sync bank accounts to Actual Budget via /transactions/sync
       --account, -a  The account to import, ex: --account="My Checking"
