@@ -8,7 +8,7 @@ const dateFns = require("date-fns");
 const inquirer = require("inquirer");
 const terminalLink = require("terminal-link");
 const { getAppConfigFromEnv, getConf } = require("./config.js");
-const { initialize, getLastTransactionDate, importPlaidTransactions, listAccounts, finalize, getBalance } = require("./actual.js");
+const { initialize, getLastTransactionDate, importPlaidTransactions, listAccounts, createAccountFromPlaid, finalize, getBalance } = require("./actual.js");
 const { sendPushoverNotification } = require("./pushover.js");
 const {
     fetchAllTransactionUpdates,
@@ -342,48 +342,143 @@ module.exports = async (command, flags) => {
             }))
         );
 
-        const accountsInTheActualBudget = await listAccounts(await initialize(config));
-        const { accountsToSync } = await inquirer.prompt({
+        const actual = await initialize(config);
+
+        const plaidChoices = Object.values(plaidAccounts).map(
+            ({ account, plaidBankName }) => ({
+                value: account.account_id,
+                name: `${plaidBankName}: ${account.name} - ${account.subtype}/${account.type} (${account.mask})`,
+            })
+        );
+
+        if (plaidChoices.length === 0) {
+            throw new Error("No unlinked Plaid accounts available to set up");
+        }
+
+        const { plaidAccountsToLink } = await inquirer.prompt({
             type: "checkbox",
-            name: "accountsToSync",
-            message: `Which actual accounts do you want to sync with plaid?`,
-            // Only show accounts that are not already linked
-            choices: accountsInTheActualBudget.map(({ name, id }) => ({ name, value: id })).filter(({ value }) => !linkedToActual.find(({ actual }) => actual === value)),
+            name: "plaidAccountsToLink",
+            message: "Which Plaid accounts should be linked? Actual accounts will be created automatically by default.",
+            choices: plaidChoices,
+            validate: (answer) =>
+                answer.length > 0 ? true : "Select at least one account",
         });
 
-        for (acctId of accountsToSync) {
-            const actualAcct = accountsInTheActualBudget.find((a) => a.id === acctId);
-            let syncChoices = Object.values(plaidAccounts).map(
-                ({ account, plaidBankName }) => ({
-                    value: account.account_id,
-                    name: `${plaidBankName}: ${account.name} - ${account.subtype}/${account.type} (${account.mask})`,
-                })
+        const { mappingMode } = await inquirer.prompt({
+            type: "list",
+            name: "mappingMode",
+            message: "How should these Plaid accounts be added to Actual?",
+            choices: [
+                {
+                    name: "Create new Actual accounts automatically (recommended)",
+                    value: "create",
+                },
+                {
+                    name: "Map to existing Actual accounts",
+                    value: "map",
+                },
+            ],
+            default: "create",
+        });
+
+        if (mappingMode === "create") {
+            for (const plaidAccountId of plaidAccountsToLink) {
+                const plaidAccountToSync = Object.values(plaidAccounts).find(
+                    ({ account }) => account.account_id === plaidAccountId
+                );
+                if (!plaidAccountToSync) continue;
+
+                const created = await createAccountFromPlaid(
+                    actual,
+                    plaidAccountToSync.plaidBankName,
+                    plaidAccountToSync.account
+                );
+                console.log(
+                    `Created Actual account "${created.name}" (${created.type}${created.offbudget ? ", off-budget" : ""}) for Plaid ${plaidAccountToSync.account.name}`
+                );
+
+                config.set(`actualSync.${created.id}`, {
+                    actualName: created.name,
+                    actualType: created.type,
+                    actualAccountId: created.id,
+                    plaidItemId: plaidAccountToSync.plaidItemId,
+                    plaidToken: plaidAccountToSync.plaidToken,
+                    plaidAccount: plaidAccountToSync.account,
+                    plaidBankName: plaidAccountToSync.plaidBankName,
+                });
+            }
+            await finalize(actual);
+        } else {
+            const accountsInTheActualBudget = await listAccounts(actual);
+            const linkedActualIds = new Set(
+                Object.keys(config.get("actualSync") || {})
             );
-            const { plaidAccountIDToSync } = await inquirer.prompt({
-                type: "list",
-                name: "plaidAccountIDToSync",
-                message: `Which Plaid acount do you want to sync with "${actualAcct.name}"?`,
-                choices: syncChoices,
-            });
-            const plaidAccountToSync = Object.values(plaidAccounts).find(
-                ({ account }) => account.account_id === plaidAccountIDToSync
+            const availableActual = accountsInTheActualBudget.filter(
+                (a) => !linkedActualIds.has(a.id)
             );
 
-            delete plaidAccounts[plaidAccountIDToSync]
+            if (availableActual.length === 0) {
+                throw new Error(
+                    "No unlinked Actual accounts found. Choose automatic create, or create accounts in Actual first."
+                );
+            }
 
-            config.set(`actualSync.${acctId}`, {
-                actualName: actualAcct.name,
-                actualType: actualAcct.type,
-                actualAccountId: actualAcct.id,
-                plaidItemId: plaidAccountToSync.plaidItemId,
-                plaidToken: plaidAccountToSync.plaidToken,
-                plaidAccount: plaidAccountToSync.account,
-                plaidBankName: plaidAccountToSync.plaidBankName,
-            });
+            let remainingPlaid = [...plaidAccountsToLink];
+
+            for (const actualAcct of availableActual) {
+                if (remainingPlaid.length === 0) break;
+
+                const syncChoices = remainingPlaid
+                    .map((plaidId) => {
+                        const entry = Object.values(plaidAccounts).find(
+                            ({ account }) => account.account_id === plaidId
+                        );
+                        if (!entry) return null;
+                        return {
+                            value: entry.account.account_id,
+                            name: `${entry.plaidBankName}: ${entry.account.name} - ${entry.account.subtype}/${entry.account.type} (${entry.account.mask})`,
+                        };
+                    })
+                    .filter(Boolean);
+
+                syncChoices.push({
+                    value: "__skip__",
+                    name: "(skip this Actual account)",
+                });
+
+                const { plaidAccountIDToSync } = await inquirer.prompt({
+                    type: "list",
+                    name: "plaidAccountIDToSync",
+                    message: `Which Plaid account do you want to sync with "${actualAcct.name}"?`,
+                    choices: syncChoices,
+                });
+
+                if (plaidAccountIDToSync === "__skip__") continue;
+
+                const plaidAccountToSync = Object.values(plaidAccounts).find(
+                    ({ account }) => account.account_id === plaidAccountIDToSync
+                );
+
+                remainingPlaid = remainingPlaid.filter(
+                    (id) => id !== plaidAccountIDToSync
+                );
+
+                config.set(`actualSync.${actualAcct.id}`, {
+                    actualName: actualAcct.name,
+                    actualType: actualAcct.type,
+                    actualAccountId: actualAcct.id,
+                    plaidItemId: plaidAccountToSync.plaidItemId,
+                    plaidToken: plaidAccountToSync.plaidToken,
+                    plaidAccount: plaidAccountToSync.account,
+                    plaidBankName: plaidAccountToSync.plaidBankName,
+                });
+            }
+            await finalize(actual);
         }
+
         printSyncedAccounts();
         console.log(
-            `Setup completed sucessfully. Run \`actualplaid import\` to sync your setup banks with their respective actual accounts`
+            `Setup completed successfully. Run \`actualplaid import\` to sync your banks with Actual.`
         );
 
     } else if (command == "check") {
