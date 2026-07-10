@@ -1,17 +1,69 @@
 # actualplaid
 
+Unofficial tool to sync bank transactions from [Plaid](https://plaid.com) into [Actual Budget](https://actualbudget.org) using Plaid Link + `/transactions/sync`.
+
+Aligned with:
+- Current Plaid API (sandbox + production only; development env removed June 2024)
+- Plaid Trial plan (production keys, up to 10 Items)
+- Cursor-based `/transactions/sync` (not legacy `/transactions/get`)
+- Current `@actual-app/api` client for self-hosted Actual
+
+## Requirements
+
+- Node.js 18+
+- Self-hosted Actual Budget server (sync ID from Advanced settings)
+- Plaid developer account ([dashboard](https://dashboard.plaid.com/signup))
+- For real banks: Plaid **Trial** or paid production access
+
+## Plaid Trial plan
+
+1. Sign up at https://dashboard.plaid.com/signup
+2. Apply for Trial at https://dashboard.plaid.com/trial-plan (up to **10 Items**)
+3. Create an app and copy **production** `client_id` + `secret`
+4. Set `PLAID_ENV=production` and `PLAID_SECRET_PRODUCTION=...`
+5. Note: removing an Item does **not** free a Trial slot
+
+Sandbox is free for fake banks only. Trial uses production keys with real institutions.
+
+### OAuth banks (Chase, etc.)
+
+Many US institutions require OAuth + production:
+
+1. Complete company profile, app branding, and security questionnaire in the Plaid dashboard
+2. Apply for production / Trial access (pay-as-you-go is typical for personal use)
+3. Serve this tool over **HTTPS** (reverse-proxy localhost:3000)
+4. Set `APP_URL=https://your.domain` and register redirect URI in Plaid API settings if prompted
+5. Link accounts from a desktop browser
+
 ## Setup
 
-NOTE: The default PLAID_ENV is `development` if you're using a sandbox for testing purposes, please set an the env variable `PLAID_ENV` to `sandbox`. Read more on the [Plaid doc site](https://dashboard.plaid.com/overview/sandbox)
+```bash
+git clone https://github.com/JacobKGilbert/actualplaid.git
+cd actualplaid
+npm ci   # or: npm install
+cp .env.sample .env
+# edit .env with Actual + Plaid credentials
+```
 
-- `yarn global add actualplaid-cli` or `npm install -g actualplaid-cli`
-- Create [plaid developer account](https://dashboard.plaid.com/overview/development) and collect client id/secret keys
-- Open Actual Budget desktop app
-- Run `setup`: `ACTUAL_BUDGET_ID=My-Finances-12345 PLAID_CLIENT_ID=my-client-id PLAID_SECRET=my-secret-key actualplaid setup`
-  - Alternatively, export these environment variables before running actualplaid
-- Login to banks you would like to sync
-- Switch back to CLI and map to accounts in Actual Budget
-- Run `import`: `ACTUAL_BUDGET_ID=My-Finances-12345 PLAID_CLIENT_ID=my-client-id PLAID_SECRET=my-secret-key actualplaid import`
+1. Open Actual and ensure the budget is available on your server
+2. Create empty accounts in Actual that will receive imports
+3. Run setup:
+
+```bash
+node index.js setup
+# or after npm link / global install:
+# actualplaid setup
+```
+
+4. Complete Plaid Link in the browser for each bank
+5. Map each Actual account to a Plaid account in the CLI
+6. Import:
+
+```bash
+node index.js import
+```
+
+First import uses a full `/transactions/sync` history pull (empty cursor). Later imports are incremental via stored cursors.
 
 ## Commands
 
@@ -20,31 +72,68 @@ NOTE: The default PLAID_ENV is `development` if you're using a sandbox for testi
     $ actualplaid <command> <flags>
 
   Commands & Options
-    setup            Link bank accounts with your Actual Budget accounts via Plai
+    setup            Link bank accounts with your Actual Budget accounts via Plaid
     ls               List currently syncing accounts
-    import           Sync bank accounts to Actual Budget
-      --account, -a   The account to import, ex: --account="My Checking"
-      --since, -s     The start date after which transactions should be imported. Defaults to beginning of current month, format: yyyy-MM-dd, ex: --since=2020-05-28
-    config           Print the location of actualplaid the config file
-    test-notify      Send a test Pushover notification to verify PUSHOVER_TOKEN/PUSHOVER_USER_KEY are configured correctly
-    --version        Print the version of actualplaid being used
+    import           Sync bank accounts to Actual Budget via /transactions/sync
+      --account, -a  The account to import, ex: --account="My Checking"
+      --since, -s    Optional lower-bound date filter (yyyy-MM-dd). Cursor still advances.
+    config           Print the location of the actualplaid config file
+    check            Compare Actual Budget balances to Plaid balances
+    test-notify      Send a test Pushover notification
+    --version        Print the version
+
+  Options for all commands
+    --user, -u       Specify the user to load configs for
 
   Examples
-    $ actualplaid import --account="My Checking" --since="2020-05-28"
+    $ actualplaid import --account="My Checking" --since="2026-01-01"
 ```
 
-## Environment Variables
+## Environment variables
 
-| Variable            | Required | Default      | Example                           | Needed by                                                                    |
-| ------------------- | -------- | ------------ | --------------------------------- | ---------------------------------------------------------------------------- |
-| ACTUAL_BUDGET_ID    | true     | ---          | My-Finances-12345                 | [Actual Budget API](https://actualbudget.com/docs/developers/using-the-API/) |
-| APP_PORT            | false    | 3000         | 3000                              | Plaid Linking                                                                |
-| PLAID_CLIENT_ID     | true     | ---          | 5817346120sd7bfd1691vfh7          | [Plaid](https://plaid.com/docs/#create-link-token)                           |
-| PLAID_SECRET        | true     | ---          | 8f5cd6729h0v5d247vc190ddcs4l2a    | [Plaid](https://plaid.com/docs/#create-link-token)                           |
-| PLAID_ENV           | false    | development  | sandbox                           | [Plaid](https://plaid.com/docs/#create-link-token)                           |
-| PLAID_PRODUCTS      | false    | transactions | transactions,auth,identity,income | [Plaid](https://plaid.com/docs/#create-link-token)                           |
-| PLAID_COUNTRY_CODES | false    | US           | US,CA,IR                          | [Plaid](https://plaid.com/docs/#create-link-token)                           |  |
-| PUSHOVER_TOKEN       | false    | ---          | a2xyz9d8fh0v5d247vc190ddcs4l2a    | [Pushover](https://pushover.net/api) notifications after `import`            |
-| PUSHOVER_USER_KEY    | false    | ---          | u3xyz9d8fh0v5d247vc190ddcs4l2a    | [Pushover](https://pushover.net/api) notifications after `import`            |
+| Variable | Required | Default | Notes |
+| --- | --- | --- | --- |
+| ACTUAL_SERVER_URL | yes | — | Actual server URL |
+| ACTUAL_SERVER_PASSWORD | yes | — | Server password |
+| ACTUAL_SERVER_ENCRYPTION_PASSWORD | no | — | Budget file encryption password |
+| PLAID_CLIENT_ID | yes | — | From Plaid dashboard |
+| PLAID_SECRET_SANDBOX | for sandbox | — | Or set `PLAID_SECRET` |
+| PLAID_SECRET_PRODUCTION | for production/Trial | — | Or set `PLAID_SECRET` |
+| PLAID_ENV | no | sandbox | `sandbox` or `production` only |
+| PLAID_PRODUCTS | no | transactions | Comma-separated |
+| PLAID_COUNTRY_CODES | no | US | Comma-separated |
+| PLAID_LANGUAGE | no | en | Link language |
+| PLAID_TRANSACTIONS_DAYS_REQUESTED | no | (Plaid default 90) | 1–730 on first Item init |
+| APP_PORT | no | 3000 | Local Link server port |
+| APP_BIND_ADDRESS | no | 127.0.0.1 | Bind address |
+| APP_URL | no | http://localhost | Public HTTPS URL for OAuth |
+| PUSHOVER_TOKEN | no | — | Optional notifications |
+| PUSHOVER_USER_KEY | no | — | Optional notifications |
 
-If `PUSHOVER_TOKEN` and `PUSHOVER_USER_KEY` are both set, `actualplaid import` sends a separate Pushover notification for each synced account that had new transactions imported. Accounts with zero new transactions are skipped, and if Pushover isn't configured, notifications are silently skipped.
+## How sync works
+
+1. **Link**: `/link/token/create` → Plaid Link → `/item/public_token/exchange`
+2. **Import**: `/transactions/sync` with stored cursor; handles `has_more` pagination and restarts on `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`
+3. **Map**: Plaid transactions → Actual via `importTransactions` (`imported_id` = Plaid `transaction_id`)
+4. **Cursor**: stored per account/Item so subsequent imports are incremental
+
+## Notes and limitations
+
+- Manually create Actual accounts before mapping
+- Initial import may not set a starting balance; add one in Actual if needed
+- Pending transactions are imported with `cleared: false`
+- Removed transactions from Plaid are logged but not auto-deleted in Actual
+- Trial cap: 10 Items
+- Run `npm test` to execute unit tests (config + `/transactions/sync` helpers)
+
+## Development
+
+```bash
+npm test
+npm start setup
+npm run import
+```
+
+## License
+
+MIT
