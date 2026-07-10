@@ -60,9 +60,118 @@ Many US institutions require OAuth + production:
 
 1. Complete company profile, app branding, and security questionnaire in the Plaid dashboard
 2. Apply for production / Trial access (pay-as-you-go is typical for personal use)
-3. Serve this tool over **HTTPS** (reverse-proxy localhost:3000)
-4. Set `APP_URL=https://your.domain` and register redirect URI in Plaid API settings if prompted
+3. Serve the Link helper over **HTTPS** (see [Exposing the Link helper via HTTPS](#exposing-the-link-helper-via-https))
+4. Set `APP_URL=https://your.domain` and register that origin as an allowed redirect URI in Plaid API settings if prompted
 5. Link accounts from a desktop browser
+
+## Exposing the Link helper via HTTPS
+
+During `setup`, actualplaid starts a small HTTP server that serves the Plaid Link page and two endpoints (`/create_link_token`, `/get_access_token`). By default it listens on `127.0.0.1:3000` (`APP_BIND_ADDRESS` / `APP_PORT`).
+
+For **non-OAuth** sandbox testing, opening `http://localhost:3000` is enough.
+
+For **OAuth institutions** (and most production/Trial bank links), Plaid expects a public **HTTPS** origin. Put any reverse proxy in front of the helper so browsers hit HTTPS while actualplaid itself stays on plain HTTP locally.
+
+### Architecture
+
+```
+Browser  --HTTPS-->  Reverse proxy (TLS cert)
+                        |
+                        | HTTP (LAN / loopback)
+                        v
+                 actualplaid Link helper
+                 (APP_BIND_ADDRESS:APP_PORT)
+```
+
+### Steps (any reverse proxy)
+
+1. **Run actualplaid on a host the proxy can reach**
+   - For same-machine proxying: bind to loopback (`APP_BIND_ADDRESS=127.0.0.1`).
+   - For a proxy on another host: bind to a LAN interface or `0.0.0.0` and firewall so only the proxy (or your LAN) can reach `APP_PORT`.
+
+2. **Create a proxy host / route**
+   - Scheme: HTTPS on the public side
+   - Backend / forward target: `http://<actualplaid-host>:<APP_PORT>` (default port `3000`)
+   - Enable WebSocket only if your proxy requires it for other apps; Link does not need it
+   - Force HTTPS / HTTP→HTTPS redirect is recommended
+
+3. **Issue a TLS certificate** for the hostname (Let's Encrypt, internal CA, DNS challenge, etc.)
+
+4. **Set environment variables** on the machine running actualplaid:
+
+   ```bash
+   APP_PORT=3000
+   APP_BIND_ADDRESS=127.0.0.1   # or 0.0.0.0 if the proxy is remote
+   APP_URL=https://plaid-link.example.com
+   ```
+
+   `APP_URL` must be the exact public origin users open in the browser (no trailing slash required). When `APP_URL` is HTTPS and not localhost, actualplaid includes it as `redirect_uri` in `/link/token/create`.
+
+5. **Register the redirect URI in Plaid** (dashboard → Team settings / API → Allowed redirect URIs) if your institutions require it:
+
+   - `https://plaid-link.example.com`
+   - Match the scheme and host used in `APP_URL`
+
+6. **Start setup and open the HTTPS URL** in a desktop browser (not only the raw localhost port):
+
+   ```bash
+   node index.js setup
+   # open https://plaid-link.example.com  (same value as APP_URL)
+   ```
+
+7. **When linking is finished**, you can stop the process and (optionally) disable or remove the public proxy host. Ongoing `import` jobs only call Plaid and Actual APIs; they do **not** need the Link helper exposed.
+
+### Example: Nginx
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name plaid-link.example.com;
+
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Example: Caddy
+
+```caddy
+plaid-link.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+### Example: Traefik (label-style, conceptual)
+
+Point a router/service at `http://actualplaid:3000` (or the host port you published), enable the TLS certificate resolver you already use, and set the Host rule to your Link hostname. Set `APP_URL` to that same `https://…` host.
+
+### Example: UI-based proxies (Nginx Proxy Manager, etc.)
+
+Create a Proxy Host:
+
+| Field | Value |
+| --- | --- |
+| Domain names | `plaid-link.example.com` |
+| Scheme | `http` |
+| Forward hostname / IP | host running actualplaid (e.g. `127.0.0.1` or LAN IP) |
+| Forward port | `3000` (or your `APP_PORT`) |
+| SSL | Request/attach certificate; enable Force SSL |
+
+Then set `APP_URL=https://plaid-link.example.com` in `.env`.
+
+### Security notes
+
+- The Link helper is only required during interactive `setup`. Prefer keeping the hostname private (VPN, auth front door, or temporary DNS) if you do not want it on the open internet.
+- Do not put Plaid secrets or Actual passwords in the reverse proxy; they stay in actualplaid’s `.env` / environment.
+- If Link fails with redirect or OAuth errors, confirm `APP_URL`, the proxy hostname, and Plaid’s allowed redirect URIs are identical (including `https://`).
 
 ## Setup
 
