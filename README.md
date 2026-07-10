@@ -184,8 +184,7 @@ cp .env.sample .env
 ```
 
 1. Open Actual and ensure the budget is available on your server
-2. Create empty accounts in Actual that will receive imports
-3. Run setup:
+2. Run setup (Plaid Link in the browser, then choose accounts):
 
 ```bash
 node index.js setup
@@ -193,15 +192,16 @@ node index.js setup
 # actualplaid setup
 ```
 
-4. Complete Plaid Link in the browser for each bank
-5. Map each Actual account to a Plaid account in the CLI
-6. Import:
+3. Select the Plaid accounts to link. By default, **Actual accounts are created automatically** from each Plaid account (name/type/off-budget mapped from Plaid). You can still choose "Map to existing Actual accounts" if you prefer.
+4. Import:
 
 ```bash
 node index.js import
 ```
 
 First import uses a full `/transactions/sync` history pull (empty cursor). Later imports are incremental via stored cursors.
+
+New Actual accounts are created with a **zero** starting balance so imported history is not double-counted. Adjust opening balances in Actual if needed after the first import.
 
 ## Commands
 
@@ -252,17 +252,18 @@ First import uses a full `/transactions/sync` history pull (empty cursor). Later
 
 1. **Link**: `/link/token/create` → Plaid Link → `/item/public_token/exchange`
 2. **Import**: `/transactions/sync` with stored cursor; handles `has_more` pagination and restarts on `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION`
-3. **Map**: Plaid transactions → Actual via `importTransactions` (`imported_id` = Plaid `transaction_id`)
-4. **Cursor**: stored per account/Item so subsequent imports are incremental
+3. **Accounts**: `setup` can auto-create Actual accounts via `createAccount`, then map them to Plaid
+4. **Map txs**: Plaid transactions → Actual via `importTransactions` (`imported_id` = Plaid `transaction_id`)
+5. **Cursor**: stored per account/Item so subsequent imports are incremental
 
 ## Notes and limitations
 
-- Manually create Actual accounts before mapping
-- Initial import may not set a starting balance; add one in Actual if needed
+- By default, `setup` creates matching Actual accounts from linked Plaid accounts (you can still map to existing ones)
+- Initial balance on auto-created accounts is 0; adjust opening balances in Actual if needed after import
 - Pending transactions are imported with `cleared: false`
 - Removed transactions from Plaid are logged but not auto-deleted in Actual
 - Trial cap: 10 Items
-- Run `npm test` to execute unit tests (config + `/transactions/sync` helpers)
+- Run `npm test` to execute unit tests (config + `/transactions/sync` helpers + account mapping)
 
 ## Development
 
