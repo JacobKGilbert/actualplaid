@@ -1,10 +1,16 @@
 {
 	"name": "actualplaid-cli",
-	"version": "0.0.6",
-	"description": "Import transactions from your bank accounts into Actual Budget via Plaid API",
+	"version": "0.1.0",
+	"description": "Import transactions from your bank accounts into Actual Budget via Plaid API (transactions/sync + Trial/production)",
 	"main": "cli.js",
 	"bin": {
 		"actualplaid": "cli.js"
+	},
+	"scripts": {
+		"test": "node --test tests/",
+		"start": "node index.js",
+		"setup": "node index.js setup",
+		"import": "node index.js import"
 	},
 	"author": "Luke Herrington <lherrington100@gmail.com>",
 	"license": "MIT",
@@ -22,6 +28,6 @@
 		"terminal-link": "^2.1.1"
 	},
 	"engines": {
-		"node": ">=10"
+		"node": ">=18"
 	}
 }
