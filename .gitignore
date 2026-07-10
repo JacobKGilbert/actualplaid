@@ -1,3 +1,6 @@
 node_modules
 .devcontainer
 .idea
+.env
+temp_data_actual
+*.log
