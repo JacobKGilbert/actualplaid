@@ -15,6 +15,35 @@ Aligned with:
 - Plaid developer account ([dashboard](https://dashboard.plaid.com/signup))
 - For real banks: Plaid **Trial** or paid production access
 
+## Where to run this
+
+**actualplaid does not need to run on the same machine as your Actual Budget server.**
+
+It is a separate client process. It talks to Actual over HTTP(S) using `ACTUAL_SERVER_URL` and your server password, and it talks to Plaid’s cloud API over the internet. Co-locating it with Actual is optional convenience, not a requirement.
+
+### What the machine running actualplaid needs
+
+1. **Outbound access to your Actual server** — the URL in `ACTUAL_SERVER_URL` must be reachable (LAN hostname, reverse-proxy URL, VPN, etc.).
+2. **Outbound internet access to Plaid** — for Link and `/transactions/sync`.
+3. **A browser that can open the Link helper** during `setup` — actualplaid starts a small local web server (`APP_PORT`, default `3000`). For many OAuth banks, that helper must be exposed as **HTTPS** via `APP_URL` (often through a reverse proxy).
+4. **Persistent local storage** — Plaid access tokens, account mappings, and sync cursors are stored in this tool’s config on the host that runs it (see `actualplaid config`), not inside Actual.
+
+### Common layouts
+
+| Layout | Works? | When to use it |
+| --- | --- | --- |
+| Same host as Actual | Yes | Simplest networking; one box to maintain |
+| Different host on the same network | Yes | Keep Actual on a server/NAS and run imports from another always-on machine |
+| Laptop / workstation only when you sync | Yes | Manual `setup` and occasional `import` without a dedicated worker |
+| Remote host over VPN or public HTTPS | Yes | As long as `ACTUAL_SERVER_URL` is reachable and secrets stay private |
+
+### Tips
+
+- Point `ACTUAL_SERVER_URL` at whatever URL your Actual clients already use (local IP, Traefik/Caddy/Nginx hostname, Tailscale, etc.).
+- You can run **setup** on one machine (for interactive bank linking) and **import** later on another, but each host keeps its own config unless you copy it.
+- For scheduled imports, any always-on host that can reach Actual and Plaid is enough (cron, systemd timer, container, etc.).
+- Protect `.env` and the config directory: they hold Plaid tokens and server credentials.
+
 ## Plaid Trial plan
 
 1. Sign up at https://dashboard.plaid.com/signup
